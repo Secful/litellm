@@ -12,7 +12,10 @@ from pydantic import TypeAdapter
 from litellm._logging import verbose_proxy_logger
 from litellm.exceptions import GuardrailRaisedException
 from litellm.integrations.custom_guardrail import CustomGuardrail
-from litellm.llms.custom_httpx.http_handler import get_async_httpx_client, httpxSpecialProvider
+from litellm.llms.custom_httpx.http_handler import (
+    get_async_httpx_client,  # pyright: ignore[reportUnknownVariableType]  # upstream params annotation is a bare dict
+    httpxSpecialProvider,
+)
 from litellm.types.guardrails import GuardrailEventHooks, Mode
 from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import (
     SaltSecurityGuardrailConfigModel,
@@ -155,12 +158,9 @@ class SaltSecurityGuardrail(CustomGuardrail):
 
     async def _ask(self, body: Mapping[str, object]) -> Mapping[str, object] | _CheckFailed:
         try:
-            response: Final = await self._client.post(self.endpoint_url, json=body, headers=self._headers)
-            if not response.is_success:
-                verbose_proxy_logger.warning(
-                    "salt_security: allowing request, endpoint returned %s", response.status_code
-                )
-                return _CheckFailed(f"http_{response.status_code}")
+            response: Final = await self._client.post(  # pyright: ignore[reportUnknownMemberType]  # upstream params are bare dicts
+                self.endpoint_url, json=dict(body), headers=dict(self._headers)
+            )
             return MappingProxyType(_ANSWER_ADAPTER.validate_json(response.content))
         except httpx.HTTPStatusError as exc:
             verbose_proxy_logger.warning(
