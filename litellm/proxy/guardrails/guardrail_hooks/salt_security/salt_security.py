@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 from litellm._logging import verbose_proxy_logger
 from litellm.exceptions import GuardrailRaisedException
 from litellm.integrations.custom_guardrail import CustomGuardrail
+from litellm.llms.custom_httpx.http_handler import get_async_httpx_client, httpxSpecialProvider
 from litellm.types.guardrails import GuardrailEventHooks, Mode
 from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import (
     SaltSecurityGuardrailConfigModel,
@@ -90,7 +91,10 @@ class SaltSecurityGuardrail(CustomGuardrail):
         self.enforcement_mode: Final = normalise_mode(enforcement_mode)
         self.block_tool_results: Final = block_tool_results
         self.verify_tls: Final = verify_tls
-        self._client: httpx.AsyncClient | None = None
+        self._client: Final = get_async_httpx_client(
+            llm_provider=httpxSpecialProvider.GuardrailCallback,
+            params={"timeout": timeout, "ssl_verify": verify_tls},
+        )
         if not verify_tls:
             verbose_proxy_logger.warning(
                 "salt_security: verify_tls is false, TLS certificates are not verified for the guardrail endpoint"
@@ -109,11 +113,6 @@ class SaltSecurityGuardrail(CustomGuardrail):
     @classmethod
     def get_supported_event_hooks(cls) -> list[GuardrailEventHooks]:  # mutable-ok: overrides a base method typed list
         return [GuardrailEventHooks.pre_call, GuardrailEventHooks.during_call, GuardrailEventHooks.post_call]
-
-    def _http_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout, verify=self.verify_tls)
-        return self._client
 
     async def apply_guardrail(
         self,
@@ -156,13 +155,18 @@ class SaltSecurityGuardrail(CustomGuardrail):
 
     async def _ask(self, body: Mapping[str, object]) -> Mapping[str, object] | _CheckFailed:
         try:
-            response: Final = await self._http_client().post(self.endpoint_url, json=body, headers=self._headers)
+            response: Final = await self._client.post(self.endpoint_url, json=body, headers=self._headers)
             if not response.is_success:
                 verbose_proxy_logger.warning(
                     "salt_security: allowing request, endpoint returned %s", response.status_code
                 )
                 return _CheckFailed(f"http_{response.status_code}")
             return MappingProxyType(_ANSWER_ADAPTER.validate_json(response.content))
+        except httpx.HTTPStatusError as exc:
+            verbose_proxy_logger.warning(
+                "salt_security: allowing request, endpoint returned %s", exc.response.status_code
+            )
+            return _CheckFailed(f"http_{exc.response.status_code}")
         except Exception as exc:
             verbose_proxy_logger.warning("salt_security: allowing request, check failed with %s", type(exc).__name__)
             return _CheckFailed(type(exc).__name__)

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 import litellm
 from litellm._logging import verbose_proxy_logger
+from litellm.caching.llm_caching_handler import LLMClientCache
 from litellm.exceptions import GuardrailRaisedException
 from litellm.proxy import proxy_server
 from litellm.proxy.guardrails.guardrail_hooks.salt_security import DEFAULT_TIMEOUT_SECONDS, SaltSecurityGuardrail
@@ -33,6 +34,8 @@ COMPANY_ID: Final = "c-test"
 @pytest.fixture(autouse=True)
 def isolate_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(litellm, "callbacks", [])
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache())
 
 
 def _load_with(
@@ -599,20 +602,36 @@ async def test_failure_records_no_secrets(salt_route: respx.MockRouter) -> None:
 
 
 @pytest.mark.parametrize("verify_tls", [True, False])
-async def test_verify_tls_setting_reaches_the_client(monkeypatch: pytest.MonkeyPatch, verify_tls: bool) -> None:
-    created: Final[list[dict[str, object]]] = []
+async def test_verify_tls_setting_reaches_the_client(verify_tls: bool) -> None:
+    guardrail: Final = _load(verify_tls=verify_tls)
 
-    class RecordingClient(httpx.AsyncClient):
-        def __init__(self, **kwargs: object) -> None:
-            created.append(dict(kwargs))
-            super().__init__(**kwargs)  # pyright: ignore[reportArgumentType]  # kwargs forwarded verbatim
+    assert guardrail._client.ssl_verify is verify_tls  # pyright: ignore[reportPrivateUsage]  # asserting the shared client's configuration
 
-    monkeypatch.setattr(httpx, "AsyncClient", RecordingClient)
-    with respx.mock(assert_all_called=False) as router:
-        router.post(ENDPOINT).mock(return_value=httpx.Response(200, json={"action": "NONE"}))
-        await _load(verify_tls=verify_tls).apply_guardrail(INPUTS, {}, "request")
 
-    assert [kwargs["verify"] for kwargs in created] == [verify_tls]
+async def test_timeout_setting_reaches_the_client() -> None:
+    guardrail: Final = _load(timeout=1.5)
+
+    assert guardrail._client.timeout == 1.5  # pyright: ignore[reportPrivateUsage]  # asserting the shared client's configuration
+
+
+def _build(verify_tls: bool) -> SaltSecurityGuardrail:
+    return SaltSecurityGuardrail(
+        api_base="https://ai.example",
+        company_id=COMPANY_ID,
+        api_key=FAKE_TOKEN,
+        timeout=2.0,
+        enforcement_mode="monitor",
+        block_tool_results=False,
+        verify_tls=verify_tls,
+        guardrail_name="salt-security",
+    )
+
+
+async def test_guardrails_with_different_settings_get_different_clients() -> None:
+    strict: Final = _build(verify_tls=True)
+    lenient: Final = _build(verify_tls=False)
+
+    assert strict._client is not lenient._client  # pyright: ignore[reportPrivateUsage]  # comparing client identity
 
 
 def _warnings_while_loading(extras: Mapping[str, object]) -> list[str]:
