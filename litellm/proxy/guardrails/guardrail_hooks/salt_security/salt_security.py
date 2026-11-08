@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -37,6 +38,10 @@ def normalise_mode(value: object) -> Literal["monitor", "block"]:
     return "monitor"
 
 
+def basic_authorization(company_id: str, token: str) -> str:
+    return "Basic " + base64.b64encode(f"{company_id}:{token}".encode()).decode()
+
+
 def _is_tool_message(message: object) -> bool:
     if not isinstance(message, Mapping):
         return False
@@ -69,6 +74,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
     def __init__(
         self,
         api_base: str,
+        company_id: str,
         api_key: str,
         timeout: float,
         enforcement_mode: object,
@@ -78,7 +84,9 @@ class SaltSecurityGuardrail(CustomGuardrail):
         **kwargs: object,  # kwargs-ok: forwarded to CustomGuardrail
     ) -> None:
         self.endpoint_url: Final = api_base.rstrip("/") + ENDPOINT_PATH
-        self._headers: Final = MappingProxyType({"content-type": "application/json", "x-api-key": api_key})
+        self._headers: Final = MappingProxyType(
+            {"content-type": "application/json", "authorization": basic_authorization(company_id, api_key)}
+        )
         self.enforcement_mode: Final = normalise_mode(enforcement_mode)
         self.block_tool_results: Final = block_tool_results
         self.verify_tls: Final = verify_tls

@@ -38,11 +38,19 @@ def _name_of(guardrail: Mapping[str, object]) -> str:
     return name if isinstance(name, str) else ""
 
 
+def extras_company_id(litellm_params: LitellmParams) -> str:
+    value: Final = _extras_of(litellm_params).get("company_id")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("salt_security: company_id is required")
+    return value.strip()
+
+
 def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) -> CustomGuardrail:
     import litellm
 
     if not litellm_params.api_base:
         raise ValueError("salt_security: api_base is required")
+    company_id: Final = extras_company_id(litellm_params)
     if not litellm_params.api_key:
         raise ValueError("salt_security: api_key is required")
     timeout: Final = DEFAULT_TIMEOUT_SECONDS if litellm_params.timeout is None else litellm_params.timeout
@@ -51,6 +59,7 @@ def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) ->
     extras: Final = _extras_of(litellm_params)
     _callback: Final = SaltSecurityGuardrail(
         api_base=litellm_params.api_base,
+        company_id=company_id,
         api_key=litellm_params.api_key,
         timeout=timeout,
         enforcement_mode=extras.get("enforcement_mode"),

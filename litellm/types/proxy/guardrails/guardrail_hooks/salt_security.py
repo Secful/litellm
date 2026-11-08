@@ -37,9 +37,13 @@ class SaltSecurityGuardrailConfigModelOptionalParams(LiteLLMBaseModel):
 
 
 class SaltSecurityGuardrailConfigModel(GuardrailConfigModel[SaltSecurityGuardrailConfigModelOptionalParams]):
+    company_id: str = Field(
+        min_length=1,
+        description="Salt Security company id, the username of the HTTP Basic credential.",
+    )
     api_key: str = Field(
         min_length=1,
-        description="Salt Security API token, sent as the x-api-key header.",
+        description="Salt Security API token, the password of the HTTP Basic credential.",
     )
     api_base: str = Field(
         min_length=1,

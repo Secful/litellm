@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Iterator, Mapping
@@ -26,6 +27,7 @@ from litellm.types.utils import GenericGuardrailAPIInputs
 
 ENDPOINT: Final = "https://ai.example/beta/litellm_basic_guardrail_api"
 FAKE_TOKEN: Final = "fake-token-do-not-use-123"
+COMPANY_ID: Final = "c-test"
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +40,12 @@ def _load_with(
     api_base: str | None = "https://ai.example",
     api_key: str | None = FAKE_TOKEN,
     mode: str | list[str] = "pre_call",
+    company_id: str | None = COMPANY_ID,
 ) -> SaltSecurityGuardrail:
-    params: Final = LitellmParams(guardrail="salt_security", mode=mode, api_base=api_base, api_key=api_key, **extras)
+    company: Final = {} if company_id is None else {"company_id": company_id}
+    params: Final = LitellmParams(
+        guardrail="salt_security", mode=mode, api_base=api_base, api_key=api_key, **company, **extras
+    )
     guardrail: Final = Guardrail(guardrail_name="salt-security", litellm_params=params)
     assert InMemoryGuardrailHandler().initialize_guardrail(guardrail) is not None
     (callback,) = litellm.callbacks
@@ -51,9 +57,10 @@ def _load(
     api_base: str | None = "https://ai.example",
     api_key: str | None = FAKE_TOKEN,
     mode: str | list[str] = "pre_call",
+    company_id: str | None = COMPANY_ID,
     **extras: object,
 ) -> SaltSecurityGuardrail:
-    return _load_with(extras, api_base, api_key, mode)
+    return _load_with(extras, api_base, api_key, mode, company_id)
 
 
 def test_loads_from_config_with_defaults() -> None:
@@ -126,6 +133,12 @@ def test_missing_api_key_fails_at_load(api_key: str | None) -> None:
         _load(api_key=api_key)
 
 
+@pytest.mark.parametrize("company_id", [None, "", "   "])
+def test_missing_company_id_fails_at_load(company_id: str | None) -> None:
+    with pytest.raises(ValueError, match="company_id"):
+        _load(company_id=company_id)
+
+
 @pytest.mark.parametrize("timeout", [0, 0.0, -1])
 def test_non_positive_timeout_fails_at_load(timeout: float) -> None:
     with pytest.raises(ValueError, match="timeout"):
@@ -185,8 +198,22 @@ async def test_sends_token_header(salt_route: respx.MockRouter) -> None:
     await _load().apply_guardrail(cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), {}, "request")
 
     headers: Final = salt_route.routes[0].calls.last.request.headers
-    assert headers["x-api-key"] == FAKE_TOKEN
+    assert headers["authorization"] == _basic(COMPANY_ID, FAKE_TOKEN)
+    assert "x-api-key" not in headers
     assert headers["content-type"] == "application/json"
+
+
+def _basic(company_id: str, token: str) -> str:
+    return "Basic " + base64.b64encode(f"{company_id}:{token}".encode()).decode()
+
+
+@pytest.mark.parametrize("token", ["abc:def", "a:b:c:", ":lead", "plain"])
+async def test_basic_header_is_company_id_colon_token(salt_route: respx.MockRouter, token: str) -> None:
+    await _load(api_key=token, company_id="acme").apply_guardrail(INPUTS, {}, "request")
+
+    assert salt_route.routes[0].calls.last.request.headers["authorization"] == _basic("acme", token)
+    decoded: Final = base64.b64decode(salt_route.routes[0].calls.last.request.headers["authorization"][6:]).decode()
+    assert decoded.split(":", 1) == ["acme", token]
 
 
 @pytest.fixture
@@ -208,8 +235,10 @@ def _caller_extra_body(**extra_body: object) -> dict[str, object]:
 def test_token_is_absent_from_repr_and_str() -> None:
     guardrail: Final = _load()
 
-    assert FAKE_TOKEN not in repr(guardrail)
-    assert FAKE_TOKEN not in str(guardrail)
+    encoded: Final = base64.b64encode(f"{COMPANY_ID}:{FAKE_TOKEN}".encode()).decode()
+    for rendered in (repr(guardrail), str(guardrail)):
+        assert FAKE_TOKEN not in rendered
+        assert encoded not in rendered
 
 
 async def test_token_header_is_sent_on_every_call(salt_route: respx.MockRouter) -> None:
@@ -218,9 +247,9 @@ async def test_token_header_is_sent_on_every_call(salt_route: respx.MockRouter) 
 
     for direction in ("request", "response"):
         await guardrail.apply_guardrail(INPUTS, {}, direction)
-        sent.append(salt_route.routes[0].calls.last.request.headers["x-api-key"])
+        sent.append(salt_route.routes[0].calls.last.request.headers["authorization"])
 
-    assert sent == [FAKE_TOKEN, FAKE_TOKEN]
+    assert sent == [_basic(COMPANY_ID, FAKE_TOKEN)] * 2
     assert salt_route.routes[0].call_count == 2
 
 
@@ -274,6 +303,7 @@ async def test_mode_normalisation(salt_route: respx.MockRouter, value: object, e
 def test_default_mode_is_pre_call() -> None:
     guardrail: Final = SaltSecurityGuardrail(
         api_base="https://ai.example",
+        company_id=COMPANY_ID,
         api_key=FAKE_TOKEN,
         timeout=DEFAULT_TIMEOUT_SECONDS,
         enforcement_mode="monitor",
