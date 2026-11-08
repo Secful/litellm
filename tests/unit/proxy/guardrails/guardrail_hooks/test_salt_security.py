@@ -658,3 +658,14 @@ def test_verify_disabled_warns_once_without_secrets() -> None:
 
 def test_verify_enabled_does_not_warn() -> None:
     assert _warnings_while_loading({"verify_tls": True}) == []
+
+
+async def test_provider_specific_params_expose_salt_security_to_the_ui() -> None:
+    from litellm.proxy.guardrails.guardrail_endpoints import get_provider_specific_params
+
+    params: Final = cast("Mapping[str, Mapping[str, object]]", await get_provider_specific_params())
+    salt: Final = params["salt_security"]
+
+    assert salt["ui_friendly_name"] == "Salt Security"
+    for field in ("company_id", "api_key", "api_base"):
+        assert cast("Mapping[str, object]", salt[field])["required"] is True
