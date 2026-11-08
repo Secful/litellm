@@ -63,7 +63,6 @@ def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) ->
         api_key=litellm_params.api_key,
         timeout=timeout,
         enforcement_mode=extras.get("enforcement_mode"),
-        block_tool_results=_bool_setting(extras, "block_tool_results", False),
         verify_tls=_bool_setting(extras, "verify_tls", True),
         guardrail_name=_name_of(guardrail),
         event_hook=_EVENT_HOOK_ADAPTER.validate_python(litellm_params.mode),

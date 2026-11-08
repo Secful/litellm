@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias
 
 import httpx
 from pydantic import TypeAdapter
@@ -46,18 +46,6 @@ def basic_authorization(company_id: str, token: str) -> str:
     return "Basic " + base64.b64encode(f"{company_id}:{token}".encode()).decode()
 
 
-def _is_tool_message(message: object) -> bool:
-    if not isinstance(message, Mapping):
-        return False
-    fields: Final = cast("Mapping[str, object]", message)  # cast-ok: isinstance leaves Mapping[Unknown, Unknown]
-    return fields.get("role") == "tool"
-
-
-def _newest_is_tool_message(inputs: GenericGuardrailAPIInputs) -> bool:
-    messages: Final[Sequence[object] | None] = inputs.get("structured_messages")
-    return bool(messages) and _is_tool_message(messages[-1])
-
-
 def request_payload(
     inputs: GenericGuardrailAPIInputs,
     input_type: Literal["request", "response"],
@@ -82,7 +70,6 @@ class SaltSecurityGuardrail(CustomGuardrail):
         api_key: str,
         timeout: float,
         enforcement_mode: object,
-        block_tool_results: bool,
         verify_tls: bool,
         event_hook: EventHook | None = None,
         **kwargs: object,  # kwargs-ok: forwarded to CustomGuardrail
@@ -92,7 +79,6 @@ class SaltSecurityGuardrail(CustomGuardrail):
             {"content-type": "application/json", "authorization": basic_authorization(company_id, api_key)}
         )
         self.enforcement_mode: Final = normalise_mode(enforcement_mode)
-        self.block_tool_results: Final = block_tool_results
         self.verify_tls: Final = verify_tls
         self._client: Final = get_async_httpx_client(
             llm_provider=httpxSpecialProvider.GuardrailCallback,
@@ -131,8 +117,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
             self._record(request_data, {"error": answer.reason}, "guardrail_failed_to_respond")
             return inputs
         blocked: Final = answer.get("action") == "BLOCKED"
-        downgraded: Final = blocked and not self.block_tool_results and _newest_is_tool_message(inputs)
-        if blocked and not downgraded:
+        if blocked:
             reason: Final = answer.get("blocked_reason")
             raise GuardrailRaisedException(
                 guardrail_name=self.guardrail_name,
@@ -140,7 +125,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
                 should_wrap_with_default_message=False,
                 blocked_content=True,
             )
-        if downgraded or answer.get("flagged") is True:
+        if answer.get("flagged") is True:
             self._record(request_data, {"guardrail_flagged": True}, "guardrail_flagged")
         return inputs
 

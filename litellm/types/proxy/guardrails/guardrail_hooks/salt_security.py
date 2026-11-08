@@ -26,10 +26,6 @@ class SaltSecurityGuardrailConfigModelOptionalParams(LiteLLMBaseModel):
             "Matched case-insensitively, any other value means monitor."
         ),
     )
-    block_tool_results: bool = Field(
-        default=False,
-        description="Also block when the finding comes from a tool result in the conversation.",
-    )
     verify_tls: bool = Field(
         default=True,
         description="Verify the TLS certificate of the Salt Security endpoint.",

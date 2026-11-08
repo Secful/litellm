@@ -72,7 +72,6 @@ def test_loads_from_config_with_defaults() -> None:
     assert callback.endpoint_url == ENDPOINT
     assert callback.timeout == DEFAULT_TIMEOUT_SECONDS
     assert callback.enforcement_mode == "monitor"
-    assert callback.block_tool_results is False
     assert callback.verify_tls is True
     assert callback.event_hook == "pre_call"
     assert callback.guardrail_name == "salt-security"
@@ -90,27 +89,24 @@ def test_supported_hooks() -> None:
 
 
 def test_extras_are_read_from_config() -> None:
-    callback: Final = _load(enforcement_mode="block", block_tool_results=True, verify_tls=False, timeout=1.5)
+    callback: Final = _load(enforcement_mode="block", verify_tls=False, timeout=1.5)
 
     assert callback.enforcement_mode == "block"
-    assert callback.block_tool_results is True
     assert callback.verify_tls is False
     assert callback.timeout == 1.5
 
 
 @pytest.mark.parametrize(("value", "expected"), [("false", False), ("False", False), ("true", True), ("TRUE", True)])
 def test_bool_settings_accept_strings(value: str, expected: bool) -> None:
-    callback: Final = _load(verify_tls=value, block_tool_results=value)
+    callback: Final = _load(verify_tls=value)
 
     assert callback.verify_tls is expected
-    assert callback.block_tool_results is expected
 
 
-@pytest.mark.parametrize("key", ["verify_tls", "block_tool_results"])
 @pytest.mark.parametrize("value", ["maybe", 1, None])
-def test_bad_bool_setting_fails_at_load_naming_the_key(key: str, value: object) -> None:
-    with pytest.raises(ValueError, match=key):
-        _load_with({key: value})
+def test_bad_bool_setting_fails_at_load_naming_the_key(value: object) -> None:
+    with pytest.raises(ValueError, match="verify_tls"):
+        _load_with({"verify_tls": value})
 
 
 @pytest.mark.parametrize("api_base", [None, ""])
@@ -148,10 +144,9 @@ def test_non_positive_timeout_fails_at_load(timeout: float) -> None:
         _load(timeout=timeout)
 
 
-@pytest.mark.parametrize("field", ["verify_tls", "block_tool_results"])
-def test_config_model_rejects_null_booleans(field: str) -> None:
+def test_config_model_rejects_null_verify_tls() -> None:
     with pytest.raises(ValidationError):
-        SaltSecurityGuardrailConfigModelOptionalParams.model_validate({field: None})
+        SaltSecurityGuardrailConfigModelOptionalParams.model_validate({"verify_tls": None})
 
 
 def test_config_model_accepts_the_modes_the_loader_accepts() -> None:
@@ -310,7 +305,6 @@ def test_default_mode_is_pre_call() -> None:
         api_key=FAKE_TOKEN,
         timeout=DEFAULT_TIMEOUT_SECONDS,
         enforcement_mode="monitor",
-        block_tool_results=False,
         verify_tls=True,
         guardrail_name="salt-security",
     )
@@ -414,32 +408,6 @@ def _with_newest(role: str) -> GenericGuardrailAPIInputs:
     return cast("GenericGuardrailAPIInputs", {"texts": ["result"], "structured_messages": messages})
 
 
-async def test_tool_role_block_is_not_enforced_by_default(salt_route: respx.MockRouter) -> None:
-    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED", "blocked_reason": "policy X"}))
-    inputs: Final = _with_newest("tool")
-    request_data: Final[dict[str, object]] = {}
-
-    result: Final = await _load().apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
-
-    assert result == inputs
-    (entry,) = _recorded(request_data)
-    assert entry["guardrail_status"] == "guardrail_flagged"
-    params: Final = cast("dict[str, object]", _sent_body(salt_route.routes[0])["additional_provider_specific_params"])
-    assert params == {"enforcement_mode": "monitor"}
-
-
-async def test_caller_cannot_enable_tool_block(salt_route: respx.MockRouter, premium_proxy: None) -> None:
-    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
-    inputs: Final = _with_newest("tool")
-    request_data: Final = _caller_extra_body(block_tool_results=True)
-    guardrail: Final = _load()
-    assert _dynamic_params(guardrail, request_data) == {"block_tool_results": True}
-
-    result: Final = await guardrail.apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
-
-    assert result == inputs
-
-
 @pytest.mark.parametrize(
     "messages",
     [["tool"], [None], [{"content": "no role"}], [{"role": None}], []],
@@ -453,21 +421,21 @@ async def test_malformed_newest_message_still_blocks(salt_route: respx.MockRoute
         await _load().apply_guardrail(inputs, {}, "request")
 
 
-async def test_tool_role_block_enforced_when_switch_on(salt_route: respx.MockRouter) -> None:
+@pytest.mark.parametrize("role", ["tool", "user", "assistant"])
+async def test_blocked_answer_blocks_whatever_the_newest_message_role(salt_route: respx.MockRouter, role: str) -> None:
     _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED", "blocked_reason": "policy X"}))
 
     with pytest.raises(GuardrailRaisedException) as raised:
-        await _load(block_tool_results=True).apply_guardrail(_with_newest("tool"), {}, "request")
+        await _load().apply_guardrail(_with_newest(role), {}, "request")
 
     assert raised.value.message == "policy X"
 
 
-@pytest.mark.parametrize("inputs", [_with_newest("user"), cast("GenericGuardrailAPIInputs", {"texts": ["hi"]})])
-async def test_non_tool_block_ignores_switch(salt_route: respx.MockRouter, inputs: GenericGuardrailAPIInputs) -> None:
+async def test_blocked_answer_blocks_without_structured_messages(salt_route: respx.MockRouter) -> None:
     _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
 
     with pytest.raises(GuardrailRaisedException):
-        await _load().apply_guardrail(inputs, {}, "request")
+        await _load().apply_guardrail(cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), {}, "request")
 
 
 async def test_tool_message_before_newest_user_message_still_blocks(salt_route: respx.MockRouter) -> None:
@@ -621,7 +589,6 @@ def _build(verify_tls: bool) -> SaltSecurityGuardrail:
         api_key=FAKE_TOKEN,
         timeout=2.0,
         enforcement_mode="monitor",
-        block_tool_results=False,
         verify_tls=verify_tls,
         guardrail_name="salt-security",
     )
