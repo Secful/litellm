@@ -12,13 +12,14 @@ from litellm._logging import verbose_proxy_logger
 from litellm.exceptions import GuardrailRaisedException
 from litellm.integrations.custom_guardrail import CustomGuardrail, log_guardrail_information
 from litellm.types.guardrails import GuardrailEventHooks
-from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import SaltSecurityGuardrailConfigModel
+from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import (
+    SaltSecurityGuardrailConfigModel,
+)
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
     from litellm.types.utils import GenericGuardrailAPIInputs
 
-DEFAULT_TIMEOUT_SECONDS: Final = 3.0
 ENDPOINT_PATH: Final = "/beta/litellm_basic_guardrail_api"
 BLOCKED_MESSAGE: Final = "Request blocked by security policy."
 _ANSWER_ADAPTER: Final = TypeAdapter(dict[str, object])
@@ -63,7 +64,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
     def __init__(
         self,
         api_base: str,
-        api_key: str | None,
+        api_key: str,
         timeout: float,
         enforcement_mode: object,
         block_tool_results: bool,

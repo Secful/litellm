@@ -5,8 +5,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from litellm.types.guardrails import SupportedGuardrailIntegrations
+from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import DEFAULT_TIMEOUT_SECONDS
 
-from .salt_security import DEFAULT_TIMEOUT_SECONDS, ENDPOINT_PATH, SaltSecurityGuardrail
+from .salt_security import ENDPOINT_PATH, SaltSecurityGuardrail
 
 if TYPE_CHECKING:
     from litellm.integrations.custom_guardrail import CustomGuardrail
@@ -30,11 +31,16 @@ def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) ->
 
     if not litellm_params.api_base:
         raise ValueError("salt_security: api_base is required")
+    if not litellm_params.api_key:
+        raise ValueError("salt_security: api_key is required")
+    timeout: Final = DEFAULT_TIMEOUT_SECONDS if litellm_params.timeout is None else litellm_params.timeout
+    if timeout <= 0:
+        raise ValueError("salt_security: timeout must be greater than 0")
     extras: Final = litellm_params.model_extra or _NO_EXTRAS
     _callback: Final = SaltSecurityGuardrail(
         api_base=litellm_params.api_base,
         api_key=litellm_params.api_key,
-        timeout=DEFAULT_TIMEOUT_SECONDS if litellm_params.timeout is None else litellm_params.timeout,
+        timeout=timeout,
         enforcement_mode=extras.get("enforcement_mode"),
         block_tool_results=_bool_setting(extras, "block_tool_results", False),
         verify_tls=_bool_setting(extras, "verify_tls", True),

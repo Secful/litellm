@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final
 
 from pydantic import ConfigDict, Field
 
@@ -8,24 +8,29 @@ from litellm.types.llms.base import LiteLLMBaseModel
 
 from .base import GuardrailConfigModel
 
+DEFAULT_TIMEOUT_SECONDS: Final = 3.0
+
 
 class SaltSecurityGuardrailConfigModelOptionalParams(LiteLLMBaseModel):
     model_config = ConfigDict(frozen=True)
 
     timeout: float | None = Field(
-        default=3.0,
+        default=DEFAULT_TIMEOUT_SECONDS,
         gt=0.0,
         description="Timeout in seconds for the Salt Security check. On timeout the request is allowed.",
     )
-    enforcement_mode: Literal["monitor", "block"] | None = Field(
+    enforcement_mode: str | None = Field(
         default="monitor",
-        description="monitor records findings and allows the request. block rejects requests Salt Security flags.",
+        description=(
+            "monitor records findings and allows the request. block rejects requests Salt Security flags. "
+            "Matched case-insensitively, any other value means monitor."
+        ),
     )
-    block_tool_results: bool | None = Field(
+    block_tool_results: bool = Field(
         default=False,
         description="Also block when the finding comes from a tool result in the conversation.",
     )
-    verify_tls: bool | None = Field(
+    verify_tls: bool = Field(
         default=True,
         description="Verify the TLS certificate of the Salt Security endpoint.",
     )

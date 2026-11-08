@@ -9,6 +9,7 @@ from typing import Final, cast
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -18,6 +19,9 @@ from litellm.proxy.guardrails.guardrail_hooks.salt_security import DEFAULT_TIMEO
 from litellm.proxy.guardrails.guardrail_hooks.salt_security.salt_security import BLOCKED_MESSAGE
 from litellm.proxy.guardrails.guardrail_registry import InMemoryGuardrailHandler
 from litellm.types.guardrails import Guardrail, GuardrailEventHooks, LitellmParams
+from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import (
+    SaltSecurityGuardrailConfigModelOptionalParams,
+)
 from litellm.types.utils import GenericGuardrailAPIInputs
 
 ENDPOINT: Final = "https://ai.example/beta/litellm_basic_guardrail_api"
@@ -29,9 +33,11 @@ def _isolate_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(litellm, "callbacks", [])
 
 
-def _load(api_base: str | None = "https://ai.example", **extras: object) -> SaltSecurityGuardrail:
+def _load(
+    api_base: str | None = "https://ai.example", api_key: str | None = FAKE_TOKEN, **extras: object
+) -> SaltSecurityGuardrail:
     params: Final = LitellmParams(
-        guardrail="salt_security", mode="pre_call", api_base=api_base, api_key=FAKE_TOKEN, **extras
+        guardrail="salt_security", mode="pre_call", api_base=api_base, api_key=api_key, **extras
     )
     guardrail: Final = Guardrail(guardrail_name="salt-security", litellm_params=params)
     assert InMemoryGuardrailHandler().initialize_guardrail(guardrail) is not None
@@ -91,6 +97,32 @@ def test_bad_bool_setting_fails_at_load_naming_the_key(key: str, value: object) 
 def test_missing_api_base_fails_at_load(api_base: str | None) -> None:
     with pytest.raises(ValueError, match="api_base"):
         _load(api_base=api_base)
+
+
+@pytest.mark.parametrize("api_key", [None, ""])
+def test_missing_api_key_fails_at_load(api_key: str | None) -> None:
+    with pytest.raises(ValueError, match="api_key"):
+        _load(api_key=api_key)
+
+
+@pytest.mark.parametrize("timeout", [0, 0.0, -1])
+def test_non_positive_timeout_fails_at_load(timeout: float) -> None:
+    with pytest.raises(ValueError, match="timeout"):
+        _load(timeout=timeout)
+
+
+@pytest.mark.parametrize("field", ["verify_tls", "block_tool_results"])
+def test_config_model_rejects_null_booleans(field: str) -> None:
+    with pytest.raises(ValidationError):
+        SaltSecurityGuardrailConfigModelOptionalParams(**{field: None})
+
+
+def test_config_model_accepts_the_modes_the_loader_accepts() -> None:
+    assert SaltSecurityGuardrailConfigModelOptionalParams(enforcement_mode="BLOCK").enforcement_mode == "BLOCK"
+
+
+def test_config_model_timeout_default_is_the_loader_default() -> None:
+    assert SaltSecurityGuardrailConfigModelOptionalParams().timeout == DEFAULT_TIMEOUT_SECONDS
 
 
 def _sent_body(route: respx.Route) -> dict[str, object]:
