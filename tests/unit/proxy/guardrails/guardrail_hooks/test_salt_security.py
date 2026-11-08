@@ -177,6 +177,23 @@ def _caller_extra_body(**extra_body: object) -> dict[str, object]:
     return {"guardrails": [{"salt-security": {"extra_body": extra_body}}]}
 
 
+def test_token_is_absent_from_repr_and_str() -> None:
+    guardrail: Final = _load()
+
+    assert FAKE_TOKEN not in repr(guardrail)
+    assert FAKE_TOKEN not in str(guardrail)
+
+
+async def test_token_header_is_sent_on_every_call(salt_route: respx.MockRouter) -> None:
+    guardrail: Final = _load()
+
+    await guardrail.apply_guardrail(INPUTS, {}, "request")
+    await guardrail.apply_guardrail(INPUTS, {}, "response")
+
+    sent: Final = [call.request.headers["x-api-key"] for call in salt_route.routes[0].calls]
+    assert sent == [FAKE_TOKEN, FAKE_TOKEN]
+
+
 @pytest.mark.parametrize(("configured", "requested"), [("block", "monitor"), ("monitor", "block")])
 async def test_caller_cannot_override_mode(
     salt_route: respx.MockRouter, premium_proxy: None, configured: str, requested: str

@@ -73,7 +73,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
         **kwargs: object,  # kwargs-ok: forwarded to CustomGuardrail
     ) -> None:
         self.endpoint_url: Final = api_base.rstrip("/") + ENDPOINT_PATH
-        self.api_key: Final = api_key
+        self._headers: Final = MappingProxyType({"content-type": "application/json", "x-api-key": api_key})
         self.enforcement_mode: Final = normalise_mode(enforcement_mode)
         self.block_tool_results: Final = block_tool_results
         self.verify_tls: Final = verify_tls
@@ -112,10 +112,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
     ) -> GenericGuardrailAPIInputs:
         call_id: Final = getattr(logging_obj, "litellm_call_id", None)
         body: Final = request_payload(inputs, input_type, call_id, self.enforcement_mode)
-        headers: Final = {"content-type": "application/json"}
-        if self.api_key:
-            headers["x-api-key"] = self.api_key
-        answer: Final = await self._ask(body, headers)
+        answer: Final = await self._ask(body)
         if isinstance(answer, _CheckFailed):
             self.add_standard_logging_guardrail_information_to_request_data(
                 guardrail_json_response={"error": answer.reason},
@@ -141,9 +138,9 @@ class SaltSecurityGuardrail(CustomGuardrail):
             )
         return inputs
 
-    async def _ask(self, body: Mapping[str, object], headers: Mapping[str, str]) -> Mapping[str, object] | _CheckFailed:
+    async def _ask(self, body: Mapping[str, object]) -> Mapping[str, object] | _CheckFailed:
         try:
-            response: Final = await self._http_client().post(self.endpoint_url, json=body, headers=dict(headers))
+            response: Final = await self._http_client().post(self.endpoint_url, json=body, headers=self._headers)
             if not response.is_success:
                 verbose_proxy_logger.warning(
                     "salt_security: allowing request, endpoint returned %s", response.status_code
