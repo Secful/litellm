@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final, Literal
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import httpx
 
+from litellm._logging import verbose_proxy_logger
+from litellm.exceptions import GuardrailRaisedException
 from litellm.integrations.custom_guardrail import CustomGuardrail, log_guardrail_information
 from litellm.types.guardrails import GuardrailEventHooks
 from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import SaltSecurityGuardrailConfigModel
@@ -15,6 +18,8 @@ if TYPE_CHECKING:
 
 DEFAULT_TIMEOUT_SECONDS: Final = 3.0
 ENDPOINT_PATH: Final = "/beta/litellm_basic_guardrail_api"
+BLOCKED_MESSAGE: Final = "Request blocked by security policy."
+_NO_ANSWER: Final[Mapping[str, object]] = MappingProxyType({})
 
 
 def request_payload(
@@ -82,5 +87,36 @@ class SaltSecurityGuardrail(CustomGuardrail):
         headers: Final = {"content-type": "application/json"}
         if self.api_key:
             headers["x-api-key"] = self.api_key
-        await self._http_client().post(self.endpoint_url, json=body, headers=headers)
+        answer: Final = await self._ask(body, headers)
+        if answer.get("action") == "BLOCKED":
+            reason: Final = answer.get("blocked_reason")
+            raise GuardrailRaisedException(
+                guardrail_name=self.guardrail_name,
+                message=reason if isinstance(reason, str) and reason else BLOCKED_MESSAGE,
+                should_wrap_with_default_message=False,
+                blocked_content=True,
+            )
+        if answer.get("flagged") is True:
+            self.add_standard_logging_guardrail_information_to_request_data(
+                guardrail_json_response={"guardrail_flagged": True},
+                request_data=request_data,
+                guardrail_status="guardrail_flagged",
+            )
         return inputs
+
+    async def _ask(self, body: Mapping[str, object], headers: Mapping[str, str]) -> Mapping[str, object]:
+        try:
+            response: Final = await self._http_client().post(self.endpoint_url, json=body, headers=dict(headers))
+            if not response.is_success:
+                verbose_proxy_logger.warning(
+                    "salt_security: allowing request, endpoint returned %s", response.status_code
+                )
+                return _NO_ANSWER
+            answer: Final = response.json()
+        except Exception as exc:
+            verbose_proxy_logger.warning("salt_security: allowing request, check failed with %s", type(exc).__name__)
+            return _NO_ANSWER
+        if not isinstance(answer, dict):
+            verbose_proxy_logger.warning("salt_security: allowing request, endpoint returned a non-object body")
+            return _NO_ANSWER
+        return cast("Mapping[str, object]", answer)
