@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal
 
 import httpx
+from pydantic import TypeAdapter
 
 from litellm._logging import verbose_proxy_logger
 from litellm.exceptions import GuardrailRaisedException
@@ -20,6 +21,7 @@ DEFAULT_TIMEOUT_SECONDS: Final = 3.0
 ENDPOINT_PATH: Final = "/beta/litellm_basic_guardrail_api"
 BLOCKED_MESSAGE: Final = "Request blocked by security policy."
 _NO_ANSWER: Final[Mapping[str, object]] = MappingProxyType({})
+_ANSWER_ADAPTER: Final = TypeAdapter(dict[str, object])
 
 
 def normalise_mode(value: object) -> Literal["monitor", "block"]:
@@ -86,7 +88,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
         return SaltSecurityGuardrailConfigModel
 
     @classmethod
-    def get_supported_event_hooks(cls) -> list[GuardrailEventHooks]:
+    def get_supported_event_hooks(cls) -> list[GuardrailEventHooks]:  # mutable-ok: overrides a base method typed list
         return [GuardrailEventHooks.pre_call, GuardrailEventHooks.during_call, GuardrailEventHooks.post_call]
 
     def _http_client(self) -> httpx.AsyncClient:
@@ -134,11 +136,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
                     "salt_security: allowing request, endpoint returned %s", response.status_code
                 )
                 return _NO_ANSWER
-            answer: Final = response.json()
+            return MappingProxyType(_ANSWER_ADAPTER.validate_json(response.content))
         except Exception as exc:
             verbose_proxy_logger.warning("salt_security: allowing request, check failed with %s", type(exc).__name__)
             return _NO_ANSWER
-        if not isinstance(answer, dict):
-            verbose_proxy_logger.warning("salt_security: allowing request, endpoint returned a non-object body")
-            return _NO_ANSWER
-        return cast("Mapping[str, object]", answer)

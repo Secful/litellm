@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from litellm.types.llms.base import LiteLLMBaseModel
 
@@ -10,6 +10,8 @@ from .base import GuardrailConfigModel
 
 
 class SaltSecurityGuardrailConfigModelOptionalParams(LiteLLMBaseModel):
+    model_config = ConfigDict(frozen=True)
+
     timeout: float | None = Field(
         default=3.0,
         gt=0.0,
