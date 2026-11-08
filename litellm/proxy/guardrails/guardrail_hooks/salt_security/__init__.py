@@ -4,16 +4,19 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
+from pydantic import TypeAdapter
+
 from litellm.types.guardrails import SupportedGuardrailIntegrations
 from litellm.types.proxy.guardrails.guardrail_hooks.salt_security import DEFAULT_TIMEOUT_SECONDS
 
-from .salt_security import ENDPOINT_PATH, SaltSecurityGuardrail
+from .salt_security import ENDPOINT_PATH, EventHook, SaltSecurityGuardrail
 
 if TYPE_CHECKING:
     from litellm.integrations.custom_guardrail import CustomGuardrail
     from litellm.types.guardrails import Guardrail, LitellmParams
 
 _NO_EXTRAS: Final[Mapping[str, object]] = MappingProxyType({})
+_EVENT_HOOK_ADAPTER: Final[TypeAdapter[EventHook]] = TypeAdapter(EventHook)
 _BOOL_STRINGS: Final = MappingProxyType({"true": True, "false": False})
 
 
@@ -26,6 +29,15 @@ def _bool_setting(extras: Mapping[str, object], key: str, default: bool) -> bool
     raise ValueError(f"salt_security: {key} must be true or false")
 
 
+def _extras_of(litellm_params: LitellmParams) -> Mapping[str, object]:
+    return litellm_params.model_extra or _NO_EXTRAS
+
+
+def _name_of(guardrail: Mapping[str, object]) -> str:
+    name: Final = guardrail.get("guardrail_name", "")
+    return name if isinstance(name, str) else ""
+
+
 def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) -> CustomGuardrail:
     import litellm
 
@@ -36,7 +48,7 @@ def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) ->
     timeout: Final = DEFAULT_TIMEOUT_SECONDS if litellm_params.timeout is None else litellm_params.timeout
     if timeout <= 0:
         raise ValueError("salt_security: timeout must be greater than 0")
-    extras: Final = litellm_params.model_extra or _NO_EXTRAS
+    extras: Final = _extras_of(litellm_params)
     _callback: Final = SaltSecurityGuardrail(
         api_base=litellm_params.api_base,
         api_key=litellm_params.api_key,
@@ -44,8 +56,8 @@ def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) ->
         enforcement_mode=extras.get("enforcement_mode"),
         block_tool_results=_bool_setting(extras, "block_tool_results", False),
         verify_tls=_bool_setting(extras, "verify_tls", True),
-        guardrail_name=guardrail.get("guardrail_name", ""),
-        event_hook=litellm_params.mode,
+        guardrail_name=_name_of(guardrail),
+        event_hook=_EVENT_HOOK_ADAPTER.validate_python(litellm_params.mode),
         default_on=litellm_params.default_on,
     )
     litellm.logging_callback_manager.add_litellm_callback(_callback)

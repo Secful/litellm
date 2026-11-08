@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from types import SimpleNamespace
 from typing import Final, cast
 
@@ -29,21 +29,31 @@ FAKE_TOKEN: Final = "fake-token-do-not-use-123"
 
 
 @pytest.fixture(autouse=True)
-def _isolate_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+def isolate_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(litellm, "callbacks", [])
 
 
-def _load(
-    api_base: str | None = "https://ai.example", api_key: str | None = FAKE_TOKEN, **extras: object
+def _load_with(
+    extras: Mapping[str, object],
+    api_base: str | None = "https://ai.example",
+    api_key: str | None = FAKE_TOKEN,
+    mode: str | list[str] = "pre_call",
 ) -> SaltSecurityGuardrail:
-    params: Final = LitellmParams(
-        guardrail="salt_security", mode="pre_call", api_base=api_base, api_key=api_key, **extras
-    )
+    params: Final = LitellmParams(guardrail="salt_security", mode=mode, api_base=api_base, api_key=api_key, **extras)
     guardrail: Final = Guardrail(guardrail_name="salt-security", litellm_params=params)
     assert InMemoryGuardrailHandler().initialize_guardrail(guardrail) is not None
     (callback,) = litellm.callbacks
     assert isinstance(callback, SaltSecurityGuardrail)
     return callback
+
+
+def _load(
+    api_base: str | None = "https://ai.example",
+    api_key: str | None = FAKE_TOKEN,
+    mode: str | list[str] = "pre_call",
+    **extras: object,
+) -> SaltSecurityGuardrail:
+    return _load_with(extras, api_base, api_key, mode)
 
 
 def test_loads_from_config_with_defaults() -> None:
@@ -90,13 +100,24 @@ def test_bool_settings_accept_strings(value: str, expected: bool) -> None:
 @pytest.mark.parametrize("value", ["maybe", 1, None])
 def test_bad_bool_setting_fails_at_load_naming_the_key(key: str, value: object) -> None:
     with pytest.raises(ValueError, match=key):
-        _load(**{key: value})
+        _load_with({key: value})
 
 
 @pytest.mark.parametrize("api_base", [None, ""])
 def test_missing_api_base_fails_at_load(api_base: str | None) -> None:
     with pytest.raises(ValueError, match="api_base"):
         _load(api_base=api_base)
+
+
+def test_list_mode_is_loaded_as_event_hooks() -> None:
+    callback: Final = _load(mode=["pre_call", "post_call"])
+
+    assert callback.event_hook == [GuardrailEventHooks.pre_call, GuardrailEventHooks.post_call]
+
+
+def test_unknown_mode_fails_at_load() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        _load(mode="pre_cal")
 
 
 @pytest.mark.parametrize("api_key", [None, ""])
@@ -114,7 +135,7 @@ def test_non_positive_timeout_fails_at_load(timeout: float) -> None:
 @pytest.mark.parametrize("field", ["verify_tls", "block_tool_results"])
 def test_config_model_rejects_null_booleans(field: str) -> None:
     with pytest.raises(ValidationError):
-        SaltSecurityGuardrailConfigModelOptionalParams(**{field: None})
+        SaltSecurityGuardrailConfigModelOptionalParams.model_validate({field: None})
 
 
 def test_config_model_accepts_the_modes_the_loader_accepts() -> None:
@@ -173,6 +194,13 @@ def premium_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proxy_server, "premium_user", True)
 
 
+def _dynamic_params(guardrail: SaltSecurityGuardrail, request_data: Mapping[str, object]) -> Mapping[str, object]:
+    return cast(
+        "Mapping[str, object]",
+        guardrail.get_guardrail_dynamic_request_body_params(dict(request_data)),  # pyright: ignore[reportUnknownMemberType]  # upstream returns a bare dict
+    )
+
+
 def _caller_extra_body(**extra_body: object) -> dict[str, object]:
     return {"guardrails": [{"salt-security": {"extra_body": extra_body}}]}
 
@@ -186,12 +214,14 @@ def test_token_is_absent_from_repr_and_str() -> None:
 
 async def test_token_header_is_sent_on_every_call(salt_route: respx.MockRouter) -> None:
     guardrail: Final = _load()
+    sent: Final[list[str]] = []
 
-    await guardrail.apply_guardrail(INPUTS, {}, "request")
-    await guardrail.apply_guardrail(INPUTS, {}, "response")
+    for direction in ("request", "response"):
+        await guardrail.apply_guardrail(INPUTS, {}, direction)
+        sent.append(salt_route.routes[0].calls.last.request.headers["x-api-key"])
 
-    sent: Final = [call.request.headers["x-api-key"] for call in salt_route.routes[0].calls]
     assert sent == [FAKE_TOKEN, FAKE_TOKEN]
+    assert salt_route.routes[0].call_count == 2
 
 
 @pytest.mark.parametrize(("configured", "requested"), [("block", "monitor"), ("monitor", "block")])
@@ -200,7 +230,7 @@ async def test_caller_cannot_override_mode(
 ) -> None:
     request_data: Final = _caller_extra_body(enforcement_mode=requested)
     guardrail: Final = _load(enforcement_mode=configured)
-    assert guardrail.get_guardrail_dynamic_request_body_params(request_data) == {"enforcement_mode": requested}
+    assert _dynamic_params(guardrail, request_data) == {"enforcement_mode": requested}
 
     await guardrail.apply_guardrail(cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), request_data, "request")
 
@@ -271,7 +301,7 @@ def _answer(router: respx.MockRouter, response: httpx.Response | Exception) -> N
 def _recorded(request_data: dict[str, object]) -> list[dict[str, object]]:
     metadata: Final = cast("dict[str, object]", request_data.get("metadata", {}))
     entries: Final = cast("list[object]", metadata.get("standard_logging_guardrail_information", []))
-    return [dict(entry) for entry in entries]  # pyright: ignore[reportCallIssue,reportArgumentType]  # TypedDict entries
+    return [dict(cast("Mapping[str, object]", entry)) for entry in entries]
 
 
 class _ListHandler(logging.Handler):
@@ -370,7 +400,7 @@ async def test_caller_cannot_enable_tool_block(salt_route: respx.MockRouter, pre
     inputs: Final = _with_newest("tool")
     request_data: Final = _caller_extra_body(block_tool_results=True)
     guardrail: Final = _load()
-    assert guardrail.get_guardrail_dynamic_request_body_params(request_data) == {"block_tool_results": True}
+    assert _dynamic_params(guardrail, request_data) == {"block_tool_results": True}
 
     result: Final = await guardrail.apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
 
@@ -497,7 +527,7 @@ async def test_timeout_fails_open_with_configured_timeout(salt_route: respx.Mock
 
     assert result == INPUTS
     assert salt_route.routes[0].call_count == 1
-    sent_timeout: Final = salt_route.routes[0].calls.last.request.extensions["timeout"]
+    sent_timeout: Final = cast("dict[str, float]", salt_route.routes[0].calls.last.request.extensions["timeout"])
     assert sent_timeout == {"connect": 1.5, "read": 1.5, "write": 1.5, "pool": 1.5}
 
 
@@ -555,13 +585,13 @@ async def test_verify_tls_setting_reaches_the_client(monkeypatch: pytest.MonkeyP
     assert [kwargs["verify"] for kwargs in created] == [verify_tls]
 
 
-def _warnings_while_loading(**extras: object) -> list[str]:
+def _warnings_while_loading(extras: Mapping[str, object]) -> list[str]:
     handler: Final = _ListHandler()
     previous_level: Final = verbose_proxy_logger.level
     verbose_proxy_logger.setLevel(logging.DEBUG)
     verbose_proxy_logger.addHandler(handler)
     try:
-        _load(**extras)
+        _load_with(extras)
     finally:
         verbose_proxy_logger.removeHandler(handler)
         verbose_proxy_logger.setLevel(previous_level)
@@ -569,7 +599,7 @@ def _warnings_while_loading(**extras: object) -> list[str]:
 
 
 def test_verify_disabled_warns_once_without_secrets() -> None:
-    warnings: Final = _warnings_while_loading(verify_tls=False)
+    warnings: Final = _warnings_while_loading({"verify_tls": False})
 
     assert len(warnings) == 1
     assert "verify_tls" in warnings[0]
@@ -578,4 +608,4 @@ def test_verify_disabled_warns_once_without_secrets() -> None:
 
 
 def test_verify_enabled_does_not_warn() -> None:
-    assert _warnings_while_loading(verify_tls=True) == []
+    assert _warnings_while_loading({"verify_tls": True}) == []
