@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from typing import Final
+import json
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Final, cast
 
+import httpx
 import pytest
+import respx
 
 import litellm
 from litellm.proxy.guardrails.guardrail_hooks.salt_security import DEFAULT_TIMEOUT_SECONDS, SaltSecurityGuardrail
 from litellm.proxy.guardrails.guardrail_registry import InMemoryGuardrailHandler
 from litellm.types.guardrails import Guardrail, GuardrailEventHooks, LitellmParams
+from litellm.types.utils import GenericGuardrailAPIInputs
 
 ENDPOINT: Final = "https://ai.example/beta/litellm_basic_guardrail_api"
 
@@ -84,3 +90,73 @@ def test_bad_bool_setting_fails_at_load_naming_the_key(key: str, value: object) 
 def test_missing_api_base_fails_at_load(api_base: str | None) -> None:
     with pytest.raises(ValueError, match="api_base"):
         _load(api_base=api_base)
+
+
+def _sent_body(route: respx.Route) -> dict[str, object]:
+    assert route.call_count == 1
+    return cast("dict[str, object]", json.loads(route.calls.last.request.content))
+
+
+@pytest.fixture
+def salt_route() -> Iterator[respx.MockRouter]:
+    with respx.mock(assert_all_called=False) as router:
+        router.post(ENDPOINT).mock(return_value=httpx.Response(200, json={"action": "NONE"}))
+        yield router
+
+
+async def test_posts_wire_body(salt_route: respx.MockRouter) -> None:
+    messages: Final = [{"role": "user", "content": "hi"}]
+    inputs: Final = cast(
+        "GenericGuardrailAPIInputs", {"texts": ["hi"], "structured_messages": messages, "model": "gpt-4o"}
+    )
+
+    await _load().apply_guardrail(
+        inputs,
+        {},
+        "request",
+        cast("object", SimpleNamespace(litellm_call_id="call-1")),  # pyright: ignore[reportArgumentType]  # minimal logging stub
+    )
+
+    assert _sent_body(salt_route.routes[0]) == {
+        "input_type": "request",
+        "litellm_call_id": "call-1",
+        "texts": ["hi"],
+        "structured_messages": messages,
+        "model": "gpt-4o",
+        "additional_provider_specific_params": {"enforcement_mode": "monitor"},
+    }
+
+
+async def test_sends_token_header(salt_route: respx.MockRouter) -> None:
+    await _load().apply_guardrail(cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), {}, "request")
+
+    headers: Final = salt_route.routes[0].calls.last.request.headers
+    assert headers["x-api-key"] == "tok"
+    assert headers["content-type"] == "application/json"
+
+
+@pytest.mark.parametrize(("configured", "requested"), [("block", "monitor"), ("monitor", "block")])
+async def test_caller_cannot_override_mode(salt_route: respx.MockRouter, configured: str, requested: str) -> None:
+    request_data: Final[dict[str, object]] = {
+        "body": {"guardrails": {"salt-security": {"extra_body": {"enforcement_mode": requested}}}}
+    }
+
+    await _load(enforcement_mode=configured).apply_guardrail(
+        cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), request_data, "request"
+    )
+
+    params: Final = cast("dict[str, object]", _sent_body(salt_route.routes[0])["additional_provider_specific_params"])
+    assert params == {"enforcement_mode": configured}
+
+
+async def test_missing_inputs_do_not_raise(salt_route: respx.MockRouter) -> None:
+    inputs: Final = cast("GenericGuardrailAPIInputs", {})
+
+    result: Final = await _load().apply_guardrail(inputs, {}, "response", None)
+
+    body: Final = _sent_body(salt_route.routes[0])
+    assert body["texts"] == []
+    assert body["structured_messages"] == []
+    assert body["litellm_call_id"] is None
+    assert body["input_type"] == "response"
+    assert result == inputs
