@@ -33,7 +33,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
         super().__init__(
             timeout=timeout,
             supported_event_hooks=self.get_supported_event_hooks(),
-            **kwargs,  # pyright: ignore[reportArgumentType]  # CustomGuardrail kwargs are untyped
+            **kwargs,  # pyright: ignore[reportArgumentType]
         )
 
     @staticmethod

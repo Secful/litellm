@@ -13,19 +13,31 @@ if TYPE_CHECKING:
     from litellm.types.guardrails import Guardrail, LitellmParams
 
 _NO_EXTRAS: Final[Mapping[str, object]] = MappingProxyType({})
+_BOOL_STRINGS: Final = MappingProxyType({"true": True, "false": False})
+
+
+def _bool_setting(extras: Mapping[str, object], key: str, default: bool) -> bool:
+    value: Final = extras.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in _BOOL_STRINGS:
+        return _BOOL_STRINGS[value.lower()]
+    raise ValueError(f"salt_security: {key} must be true or false")
 
 
 def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) -> CustomGuardrail:
     import litellm
 
+    if not litellm_params.api_base:
+        raise ValueError("salt_security: api_base is required")
     extras: Final = litellm_params.model_extra or _NO_EXTRAS
     _callback: Final = SaltSecurityGuardrail(
-        api_base=litellm_params.api_base or "",
+        api_base=litellm_params.api_base,
         api_key=litellm_params.api_key,
         timeout=DEFAULT_TIMEOUT_SECONDS if litellm_params.timeout is None else litellm_params.timeout,
-        enforcement_mode=str(extras.get("enforcement_mode", "monitor")),
-        block_tool_results=extras.get("block_tool_results", False) is True,
-        verify_tls=extras.get("verify_tls", True) is not False,
+        enforcement_mode="block" if extras.get("enforcement_mode") == "block" else "monitor",
+        block_tool_results=_bool_setting(extras, "block_tool_results", False),
+        verify_tls=_bool_setting(extras, "verify_tls", True),
         guardrail_name=guardrail.get("guardrail_name", ""),
         event_hook=litellm_params.mode,
         default_on=litellm_params.default_on,
