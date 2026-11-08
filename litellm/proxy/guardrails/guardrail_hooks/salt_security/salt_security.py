@@ -70,6 +70,10 @@ class SaltSecurityGuardrail(CustomGuardrail):
         self.block_tool_results: Final = block_tool_results
         self.verify_tls: Final = verify_tls
         self._client: httpx.AsyncClient | None = None
+        if not verify_tls:
+            verbose_proxy_logger.warning(
+                "salt_security: verify_tls is false, TLS certificates are not verified for the guardrail endpoint"
+            )
         super().__init__(
             timeout=timeout,
             event_hook=GuardrailEventHooks.pre_call if event_hook is None else event_hook,  # pyright: ignore[reportArgumentType]  # CustomGuardrail event_hook union is wider than object

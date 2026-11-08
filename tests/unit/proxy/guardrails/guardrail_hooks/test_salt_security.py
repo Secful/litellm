@@ -455,3 +455,46 @@ async def test_failure_records_no_secrets(salt_route: respx.MockRouter) -> None:
     dumped: Final = json.dumps(request_data, default=str)
     for secret in (FAKE_TOKEN, SENTINEL_PROMPT, SENTINEL_BODY):
         assert secret not in dumped
+
+
+@pytest.mark.parametrize("verify_tls", [True, False])
+async def test_verify_tls_setting_reaches_the_client(monkeypatch: pytest.MonkeyPatch, verify_tls: bool) -> None:
+    created: Final[list[dict[str, object]]] = []
+
+    class RecordingClient(httpx.AsyncClient):
+        def __init__(self, **kwargs: object) -> None:
+            created.append(dict(kwargs))
+            super().__init__(**kwargs)  # pyright: ignore[reportArgumentType]  # kwargs forwarded verbatim
+
+    monkeypatch.setattr(httpx, "AsyncClient", RecordingClient)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(ENDPOINT).mock(return_value=httpx.Response(200, json={"action": "NONE"}))
+        await _load(verify_tls=verify_tls).apply_guardrail(INPUTS, {}, "request")
+
+    assert [kwargs["verify"] for kwargs in created] == [verify_tls]
+
+
+def _warnings_while_loading(**extras: object) -> list[str]:
+    handler: Final = _ListHandler()
+    previous_level: Final = verbose_proxy_logger.level
+    verbose_proxy_logger.setLevel(logging.DEBUG)
+    verbose_proxy_logger.addHandler(handler)
+    try:
+        _load(**extras)
+    finally:
+        verbose_proxy_logger.removeHandler(handler)
+        verbose_proxy_logger.setLevel(previous_level)
+    return [record.getMessage() for record in handler.records if record.levelno == logging.WARNING]
+
+
+def test_verify_disabled_warns_once_without_secrets() -> None:
+    warnings: Final = _warnings_while_loading(verify_tls=False)
+
+    assert len(warnings) == 1
+    assert "verify_tls" in warnings[0]
+    assert FAKE_TOKEN not in warnings[0]
+    assert "ai.example" not in warnings[0]
+
+
+def test_verify_enabled_does_not_warn() -> None:
+    assert _warnings_while_loading(verify_tls=True) == []
