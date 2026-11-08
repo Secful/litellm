@@ -13,6 +13,7 @@ import respx
 import litellm
 from litellm._logging import verbose_proxy_logger
 from litellm.exceptions import GuardrailRaisedException
+from litellm.proxy import proxy_server
 from litellm.proxy.guardrails.guardrail_hooks.salt_security import DEFAULT_TIMEOUT_SECONDS, SaltSecurityGuardrail
 from litellm.proxy.guardrails.guardrail_hooks.salt_security.salt_security import BLOCKED_MESSAGE
 from litellm.proxy.guardrails.guardrail_registry import InMemoryGuardrailHandler
@@ -135,15 +136,24 @@ async def test_sends_token_header(salt_route: respx.MockRouter) -> None:
     assert headers["content-type"] == "application/json"
 
 
-@pytest.mark.parametrize(("configured", "requested"), [("block", "monitor"), ("monitor", "block")])
-async def test_caller_cannot_override_mode(salt_route: respx.MockRouter, configured: str, requested: str) -> None:
-    request_data: Final[dict[str, object]] = {
-        "body": {"guardrails": {"salt-security": {"extra_body": {"enforcement_mode": requested}}}}
-    }
+@pytest.fixture
+def premium_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proxy_server, "premium_user", True)
 
-    await _load(enforcement_mode=configured).apply_guardrail(
-        cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), request_data, "request"
-    )
+
+def _caller_extra_body(**extra_body: object) -> dict[str, object]:
+    return {"guardrails": [{"salt-security": {"extra_body": extra_body}}]}
+
+
+@pytest.mark.parametrize(("configured", "requested"), [("block", "monitor"), ("monitor", "block")])
+async def test_caller_cannot_override_mode(
+    salt_route: respx.MockRouter, premium_proxy: None, configured: str, requested: str
+) -> None:
+    request_data: Final = _caller_extra_body(enforcement_mode=requested)
+    guardrail: Final = _load(enforcement_mode=configured)
+    assert guardrail.get_guardrail_dynamic_request_body_params(request_data) == {"enforcement_mode": requested}
+
+    await guardrail.apply_guardrail(cast("GenericGuardrailAPIInputs", {"texts": ["hi"]}), request_data, "request")
 
     params: Final = cast("dict[str, object]", _sent_body(salt_route.routes[0])["additional_provider_specific_params"])
     assert params == {"enforcement_mode": configured}
@@ -306,15 +316,14 @@ async def test_tool_role_block_is_not_enforced_by_default(salt_route: respx.Mock
     assert params == {"enforcement_mode": "monitor"}
 
 
-async def test_caller_cannot_enable_tool_block(salt_route: respx.MockRouter) -> None:
+async def test_caller_cannot_enable_tool_block(salt_route: respx.MockRouter, premium_proxy: None) -> None:
     _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
     inputs: Final = _with_newest("tool")
-    request_data: Final[dict[str, object]] = {
-        "body": {"guardrails": {"salt-security": {"extra_body": {"block_tool_results": True}}}},
-        "metadata": {"block_tool_results": True},
-    }
+    request_data: Final = _caller_extra_body(block_tool_results=True)
+    guardrail: Final = _load()
+    assert guardrail.get_guardrail_dynamic_request_body_params(request_data) == {"block_tool_results": True}
 
-    result: Final = await _load().apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
+    result: Final = await guardrail.apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
 
     assert result == inputs
 
