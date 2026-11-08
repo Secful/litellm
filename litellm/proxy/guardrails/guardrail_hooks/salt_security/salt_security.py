@@ -22,6 +22,20 @@ BLOCKED_MESSAGE: Final = "Request blocked by security policy."
 _NO_ANSWER: Final[Mapping[str, object]] = MappingProxyType({})
 
 
+def normalise_mode(value: object) -> Literal["monitor", "block"]:
+    if isinstance(value, str) and value.strip().lower() == "block":
+        return "block"
+    return "monitor"
+
+
+def _newest_is_tool_message(inputs: GenericGuardrailAPIInputs) -> bool:
+    messages: Final = inputs.get("structured_messages")
+    if not messages:
+        return False
+    newest: Final = cast("Mapping[str, object]", messages[-1])
+    return newest.get("role") == "tool"
+
+
 def request_payload(
     inputs: GenericGuardrailAPIInputs,
     input_type: Literal["request", "response"],
@@ -44,14 +58,14 @@ class SaltSecurityGuardrail(CustomGuardrail):
         api_base: str,
         api_key: str | None,
         timeout: float,
-        enforcement_mode: str,
+        enforcement_mode: object,
         block_tool_results: bool,
         verify_tls: bool,
         **kwargs: object,  # kwargs-ok: forwarded to CustomGuardrail
     ) -> None:
         self.endpoint_url: Final = api_base.rstrip("/") + ENDPOINT_PATH
         self.api_key: Final = api_key
-        self.enforcement_mode: Final = enforcement_mode
+        self.enforcement_mode: Final = normalise_mode(enforcement_mode)
         self.block_tool_results: Final = block_tool_results
         self.verify_tls: Final = verify_tls
         self._client: httpx.AsyncClient | None = None
@@ -88,7 +102,9 @@ class SaltSecurityGuardrail(CustomGuardrail):
         if self.api_key:
             headers["x-api-key"] = self.api_key
         answer: Final = await self._ask(body, headers)
-        if answer.get("action") == "BLOCKED":
+        blocked: Final = answer.get("action") == "BLOCKED"
+        downgraded: Final = blocked and not self.block_tool_results and _newest_is_tool_message(inputs)
+        if blocked and not downgraded:
             reason: Final = answer.get("blocked_reason")
             raise GuardrailRaisedException(
                 guardrail_name=self.guardrail_name,
@@ -96,7 +112,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
                 should_wrap_with_default_message=False,
                 blocked_content=True,
             )
-        if answer.get("flagged") is True:
+        if downgraded or answer.get("flagged") is True:
             self.add_standard_logging_guardrail_information_to_request_data(
                 guardrail_json_response={"guardrail_flagged": True},
                 request_data=request_data,

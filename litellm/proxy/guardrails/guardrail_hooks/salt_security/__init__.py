@@ -35,7 +35,7 @@ def initialize_guardrail(litellm_params: LitellmParams, guardrail: Guardrail) ->
         api_base=litellm_params.api_base,
         api_key=litellm_params.api_key,
         timeout=DEFAULT_TIMEOUT_SECONDS if litellm_params.timeout is None else litellm_params.timeout,
-        enforcement_mode="block" if extras.get("enforcement_mode") == "block" else "monitor",
+        enforcement_mode=extras.get("enforcement_mode"),
         block_tool_results=_bool_setting(extras, "block_tool_results", False),
         verify_tls=_bool_setting(extras, "verify_tls", True),
         guardrail_name=guardrail.get("guardrail_name", ""),

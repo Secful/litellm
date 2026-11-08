@@ -71,11 +71,6 @@ def test_extras_are_read_from_config() -> None:
     assert callback.timeout == 1.5
 
 
-@pytest.mark.parametrize("value", [None, "Block", "bogus", ""])
-def test_enforcement_mode_other_than_exact_block_is_monitor(value: object) -> None:
-    assert _load(enforcement_mode=value).enforcement_mode == "monitor"
-
-
 @pytest.mark.parametrize(("value", "expected"), [("false", False), ("False", False), ("true", True), ("TRUE", True)])
 def test_bool_settings_accept_strings(value: str, expected: bool) -> None:
     callback: Final = _load(verify_tls=value, block_tool_results=value)
@@ -167,6 +162,30 @@ async def test_missing_inputs_do_not_raise(salt_route: respx.MockRouter) -> None
     assert result == inputs
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("block", "block"),
+        ("BLOCK", "block"),
+        (" block ", "block"),
+        ("monitor", "monitor"),
+        ("", "monitor"),
+        (None, "monitor"),
+        ("enforce", "monitor"),
+        (5, "monitor"),
+    ],
+)
+async def test_mode_normalisation(salt_route: respx.MockRouter, value: object, expected: str) -> None:
+    await _load(enforcement_mode=value).apply_guardrail(INPUTS, {}, "request")
+
+    params: Final = cast("dict[str, object]", _sent_body(salt_route.routes[0])["additional_provider_specific_params"])
+    assert params == {"enforcement_mode": expected}
+
+
+def test_default_mode_is_pre_call() -> None:
+    assert _load().event_hook == GuardrailEventHooks.pre_call
+
+
 SENTINEL_PROMPT: Final = "sentinel-prompt-text-7f3a"
 SENTINEL_BODY: Final = "sentinel-response-body-9c1d"
 INPUTS: Final = cast("GenericGuardrailAPIInputs", {"texts": [SENTINEL_PROMPT]})
@@ -237,6 +256,84 @@ async def test_flagged_is_recorded(salt_route: respx.MockRouter) -> None:
     assert entry["guardrail_response"] == {"guardrail_flagged": True}
 
 
+async def test_flagged_is_recorded_once_with_keyword_call(salt_route: respx.MockRouter) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "NONE", "flagged": True}))
+    request_data: Final[dict[str, object]] = {}
+
+    result: Final = await _load().apply_guardrail(inputs=INPUTS, request_data=request_data, input_type="request")
+
+    assert result == INPUTS
+    (entry,) = _recorded(request_data)
+    assert entry["guardrail_status"] == "guardrail_flagged"
+
+
+async def test_block_wins_over_flagged(salt_route: respx.MockRouter) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED", "flagged": True}))
+    request_data: Final[dict[str, object]] = {}
+
+    with pytest.raises(GuardrailRaisedException):
+        await _load().apply_guardrail(inputs=INPUTS, request_data=request_data, input_type="request")
+
+    assert all(entry["guardrail_status"] != "guardrail_flagged" for entry in _recorded(request_data))
+
+
+def _with_newest(role: str) -> GenericGuardrailAPIInputs:
+    messages: Final = [{"role": "user", "content": "hi"}, {"role": role, "content": "result"}]
+    return cast("GenericGuardrailAPIInputs", {"texts": ["result"], "structured_messages": messages})
+
+
+async def test_tool_role_block_is_not_enforced_by_default(salt_route: respx.MockRouter) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED", "blocked_reason": "policy X"}))
+    inputs: Final = _with_newest("tool")
+    request_data: Final[dict[str, object]] = {}
+
+    result: Final = await _load().apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
+
+    assert result == inputs
+    (entry,) = _recorded(request_data)
+    assert entry["guardrail_status"] == "guardrail_flagged"
+
+
+async def test_tool_role_block_enforced_when_switch_on(salt_route: respx.MockRouter) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED", "blocked_reason": "policy X"}))
+
+    with pytest.raises(GuardrailRaisedException) as raised:
+        await _load(block_tool_results=True).apply_guardrail(_with_newest("tool"), {}, "request")
+
+    assert raised.value.message == "policy X"
+
+
+@pytest.mark.parametrize("inputs", [_with_newest("user"), cast("GenericGuardrailAPIInputs", {"texts": ["hi"]})])
+async def test_non_tool_block_ignores_switch(salt_route: respx.MockRouter, inputs: GenericGuardrailAPIInputs) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
+
+    with pytest.raises(GuardrailRaisedException):
+        await _load().apply_guardrail(inputs, {}, "request")
+
+
+async def test_tool_message_before_newest_user_message_still_blocks(salt_route: respx.MockRouter) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
+    messages: Final = [{"role": "tool", "content": "old"}, {"role": "user", "content": "now"}]
+    inputs: Final = cast("GenericGuardrailAPIInputs", {"structured_messages": messages})
+
+    with pytest.raises(GuardrailRaisedException):
+        await _load().apply_guardrail(inputs, {}, "request")
+
+
+@pytest.mark.parametrize("action", ["BLOCKED", "NONE"])
+async def test_response_direction(salt_route: respx.MockRouter, action: str) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": action}))
+    guardrail: Final = _load()
+
+    if action == "BLOCKED":
+        with pytest.raises(GuardrailRaisedException):
+            await guardrail.apply_guardrail(INPUTS, {}, "response")
+    else:
+        assert await guardrail.apply_guardrail(INPUTS, {}, "response") == INPUTS
+
+    assert _sent_body(salt_route.routes[0])["input_type"] == "response"
+
+
 @pytest.mark.parametrize("flagged", ["yes", 1, None, False])
 async def test_non_true_flagged_is_not_recorded_as_flagged(salt_route: respx.MockRouter, flagged: object) -> None:
     _answer(salt_route, httpx.Response(200, json={"action": "NONE", "flagged": flagged}))
@@ -285,8 +382,16 @@ async def test_timeout_fails_open_with_configured_timeout(salt_route: respx.Mock
     assert sent_timeout == {"connect": 1.5, "read": 1.5, "write": 1.5, "pool": 1.5}
 
 
-async def test_failure_logs_no_secrets(salt_route: respx.MockRouter) -> None:
-    _answer(salt_route, httpx.Response(500, content=SENTINEL_BODY.encode()))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(httpx.Response(500, content=SENTINEL_BODY.encode()), id="500-body"),
+        pytest.param(httpx.ConnectError(f"cannot reach {FAKE_TOKEN} {SENTINEL_PROMPT}"), id="exception-text"),
+        pytest.param(httpx.ReadTimeout(f"slow {FAKE_TOKEN} {SENTINEL_PROMPT} {SENTINEL_BODY}"), id="timeout-text"),
+    ],
+)
+async def test_failure_logs_no_secrets(salt_route: respx.MockRouter, failure: httpx.Response | Exception) -> None:
+    _answer(salt_route, failure)
     handler: Final = _ListHandler()
     previous_level: Final = verbose_proxy_logger.level
     verbose_proxy_logger.setLevel(logging.DEBUG)
