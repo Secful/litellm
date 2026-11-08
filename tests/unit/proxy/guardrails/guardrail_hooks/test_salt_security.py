@@ -183,7 +183,17 @@ async def test_mode_normalisation(salt_route: respx.MockRouter, value: object, e
 
 
 def test_default_mode_is_pre_call() -> None:
-    assert _load().event_hook == GuardrailEventHooks.pre_call
+    guardrail: Final = SaltSecurityGuardrail(
+        api_base="https://ai.example",
+        api_key=FAKE_TOKEN,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        enforcement_mode="monitor",
+        block_tool_results=False,
+        verify_tls=True,
+        guardrail_name="salt-security",
+    )
+
+    assert guardrail.event_hook == GuardrailEventHooks.pre_call
 
 
 SENTINEL_PROMPT: Final = "sentinel-prompt-text-7f3a"
@@ -292,6 +302,34 @@ async def test_tool_role_block_is_not_enforced_by_default(salt_route: respx.Mock
     assert result == inputs
     (entry,) = _recorded(request_data)
     assert entry["guardrail_status"] == "guardrail_flagged"
+    params: Final = cast("dict[str, object]", _sent_body(salt_route.routes[0])["additional_provider_specific_params"])
+    assert params == {"enforcement_mode": "monitor"}
+
+
+async def test_caller_cannot_enable_tool_block(salt_route: respx.MockRouter) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
+    inputs: Final = _with_newest("tool")
+    request_data: Final[dict[str, object]] = {
+        "body": {"guardrails": {"salt-security": {"extra_body": {"block_tool_results": True}}}},
+        "metadata": {"block_tool_results": True},
+    }
+
+    result: Final = await _load().apply_guardrail(inputs=inputs, request_data=request_data, input_type="request")
+
+    assert result == inputs
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [["tool"], [None], [{"content": "no role"}], [{"role": None}], []],
+    ids=["str", "none", "no-role", "role-none", "empty"],
+)
+async def test_malformed_newest_message_still_blocks(salt_route: respx.MockRouter, messages: list[object]) -> None:
+    _answer(salt_route, httpx.Response(200, json={"action": "BLOCKED"}))
+    inputs: Final = cast("GenericGuardrailAPIInputs", {"texts": ["hi"], "structured_messages": messages})
+
+    with pytest.raises(GuardrailRaisedException):
+        await _load().apply_guardrail(inputs, {}, "request")
 
 
 async def test_tool_role_block_enforced_when_switch_on(salt_route: respx.MockRouter) -> None:

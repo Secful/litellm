@@ -32,8 +32,8 @@ def _newest_is_tool_message(inputs: GenericGuardrailAPIInputs) -> bool:
     messages: Final = inputs.get("structured_messages")
     if not messages:
         return False
-    newest: Final = cast("Mapping[str, object]", messages[-1])
-    return newest.get("role") == "tool"
+    newest: Final[object] = messages[-1]
+    return isinstance(newest, Mapping) and newest.get("role") == "tool"
 
 
 def request_payload(
@@ -61,6 +61,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
         enforcement_mode: object,
         block_tool_results: bool,
         verify_tls: bool,
+        event_hook: object = None,
         **kwargs: object,  # kwargs-ok: forwarded to CustomGuardrail
     ) -> None:
         self.endpoint_url: Final = api_base.rstrip("/") + ENDPOINT_PATH
@@ -71,6 +72,7 @@ class SaltSecurityGuardrail(CustomGuardrail):
         self._client: httpx.AsyncClient | None = None
         super().__init__(
             timeout=timeout,
+            event_hook=GuardrailEventHooks.pre_call if event_hook is None else event_hook,  # pyright: ignore[reportArgumentType]  # CustomGuardrail event_hook union is wider than object
             supported_event_hooks=self.get_supported_event_hooks(),
             **kwargs,  # pyright: ignore[reportArgumentType]  # CustomGuardrail.__init__ kwargs are untyped
         )
