@@ -418,6 +418,29 @@ async def test_fails_open(salt_route: respx.MockRouter, failure: httpx.Response 
     assert await _load().apply_guardrail(INPUTS, {}, "request") == INPUTS
 
 
+@pytest.mark.parametrize("failure", FAILURES)
+async def test_fail_open_is_recorded_as_failed_to_respond(
+    salt_route: respx.MockRouter, failure: httpx.Response | Exception
+) -> None:
+    _answer(salt_route, failure)
+    request_data: Final[dict[str, object]] = {}
+
+    result: Final = await _load().apply_guardrail(inputs=INPUTS, request_data=request_data, input_type="request")
+
+    assert result == INPUTS
+    (entry,) = _recorded(request_data)
+    assert entry["guardrail_status"] == "guardrail_failed_to_respond"
+
+
+async def test_normal_allow_is_recorded_as_success(salt_route: respx.MockRouter) -> None:
+    request_data: Final[dict[str, object]] = {"model": "gpt-4o"}
+
+    await _load().apply_guardrail(inputs=INPUTS, request_data=request_data, input_type="request")
+
+    (entry,) = _recorded(request_data)
+    assert entry["guardrail_status"] == "success"
+
+
 async def test_timeout_fails_open_with_configured_timeout(salt_route: respx.MockRouter) -> None:
     _answer(salt_route, httpx.ReadTimeout("slow"))
 

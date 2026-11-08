@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -20,8 +21,12 @@ if TYPE_CHECKING:
 DEFAULT_TIMEOUT_SECONDS: Final = 3.0
 ENDPOINT_PATH: Final = "/beta/litellm_basic_guardrail_api"
 BLOCKED_MESSAGE: Final = "Request blocked by security policy."
-_NO_ANSWER: Final[Mapping[str, object]] = MappingProxyType({})
 _ANSWER_ADAPTER: Final = TypeAdapter(dict[str, object])
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckFailed:
+    reason: str
 
 
 def normalise_mode(value: object) -> Literal["monitor", "block"]:
@@ -110,6 +115,13 @@ class SaltSecurityGuardrail(CustomGuardrail):
         if self.api_key:
             headers["x-api-key"] = self.api_key
         answer: Final = await self._ask(body, headers)
+        if isinstance(answer, _CheckFailed):
+            self.add_standard_logging_guardrail_information_to_request_data(
+                guardrail_json_response={"error": answer.reason},
+                request_data=request_data,
+                guardrail_status="guardrail_failed_to_respond",
+            )
+            return inputs
         blocked: Final = answer.get("action") == "BLOCKED"
         downgraded: Final = blocked and not self.block_tool_results and _newest_is_tool_message(inputs)
         if blocked and not downgraded:
@@ -128,15 +140,15 @@ class SaltSecurityGuardrail(CustomGuardrail):
             )
         return inputs
 
-    async def _ask(self, body: Mapping[str, object], headers: Mapping[str, str]) -> Mapping[str, object]:
+    async def _ask(self, body: Mapping[str, object], headers: Mapping[str, str]) -> Mapping[str, object] | _CheckFailed:
         try:
             response: Final = await self._http_client().post(self.endpoint_url, json=body, headers=dict(headers))
             if not response.is_success:
                 verbose_proxy_logger.warning(
                     "salt_security: allowing request, endpoint returned %s", response.status_code
                 )
-                return _NO_ANSWER
+                return _CheckFailed(f"http_{response.status_code}")
             return MappingProxyType(_ANSWER_ADAPTER.validate_json(response.content))
         except Exception as exc:
             verbose_proxy_logger.warning("salt_security: allowing request, check failed with %s", type(exc).__name__)
-            return _NO_ANSWER
+            return _CheckFailed(type(exc).__name__)
